@@ -127,71 +127,18 @@ class MetasploitModule < Msf::Auxiliary
             return 'server_response_error'
           end
 
-          if parsed_json['code'] == 60000 || parsed_json.key?('data')
-            v2_data = parsed_json['data'] || []
-
-            mapped_matches = v2_data.map do |item|
-
-              city_name = item['city.name'] || item['city'] || 'Unknown'
-              country_name = item['country.name'] || item['country'] || 'Unknown'
-
-              geoinfo = {
-                'city'    => { 'names' => { 'en' => city_name } },
-                'country' => { 'names' => { 'en' => country_name } }
-              }
-
-              if resource.include?('host')
-                {
-                  'ip'       => item['ip'],
-                  'geoinfo'  => geoinfo,
-                  'protocol' => { 'transport' => item['protocol'] || 'tcp' },
-                  'portinfo' => {
-                    'port'     => item['port'],
-                    'hostname' => item['hostname'] || item['domain'] || '',
-                    'os'       => item['os'] || '',
-                    # Map v2 'product' to Metasploit's expected 'app' key
-                    'app'      => item['product'] || item['app'] || '',
-                    'service'  => item['service'] || 'unknown',
-                    'version'  => item['version'] || '',
-                    'info'     => item['banner'] || ''
-                  }
-                }
-              else
-                ips = item['ip'].is_a?(Array) ? item['ip'] : [item['ip']].compact
-                site_name = item['site'] || item['domain']
-                site_name = ips.first if site_name.to_s.empty?
-
-                db_data = item['db'].is_a?(Array) ? item['db'] : []
-                webapp_data = item['webapp'].is_a?(Array) ? item['webapp'] : []
-
-                if webapp_data.empty? && item['product']
-                  webapp_data = [{'name' => item['product'], 'version' => item['version']}]
-                end
-
-                {
-                  'ip'      => ips,
-                  'site'    => site_name,
-                  'geoinfo' => geoinfo,
-                  'db'      => db_data,
-                  'webapp'  => webapp_data
-                }
-              end
-            end
-
-            return {
-              'matches' => mapped_matches,
-              'facets'  => parsed_json['facets'] || {},
-              'total'   => parsed_json['total'] || 0
-            }
-          end
+          # Return raw v2 data matches directly without key remapping
+          return {
+            'matches' => parsed_json['data'] || [],
+            'facets'  => parsed_json['facets'] || {},
+            'total'   => parsed_json['total'] || 0
+          }
         end
 
         return raw_results
       rescue JSON::ParserError
         return 'server_response_error'
       end
-    else
-      return 'server_response_error'
     end
   end
 
@@ -285,86 +232,48 @@ class MetasploitModule < Msf::Auxiliary
         'Indent' => 1,
         'Columns' => ['IP:Port', 'Protocol', 'City', 'Country', 'Hostname', 'OS', 'Service', 'AppName', 'Version', 'Info']
       )
-      tbl2 = Rex::Text::Table.new(
-        'Header' => 'Web search',
-        'Indent' => 1,
-        'Columns' => ['IP', 'Site', 'City', 'Country', 'DB:Version', 'WebApp:Version']
-      )
-      # scroll max pages from ZoomEye
+      results = [results] unless results.is_a?(Array)
+
       results.each do |result|
-        result['matches'].each do |match|
-          city = match['geoinfo']['city']['names']['en']
-          country = match['geoinfo']['country']['names']['en']
-          if resource.include?('host')
-            ip = match['ip']
-            protocol = match['protocol']['transport']
-            port = match['portinfo']['port']
-            hostname = match['portinfo']['hostname']
-            os = match['portinfo']['os']
-            app = match['portinfo']['app']
-            service = match['portinfo']['service']
-            version = match['portinfo']['version']
-            info = match['portinfo']['info']
-            if datastore['DATABASE']
-              report_host(host: ip,
-                          name: hostname,
-                          os_name: os,
-                          comments: 'Added from Zoomeye')
-            end
-            if datastore['DATABASE']
-              protocol = 'tcp' if ((protocol != 'tcp') || (protocol != 'udp'))
-              report_service(host: ip,
-                             port: port,
-                             proto: protocol,
-                             name: service,
-                             info: "#{app} running version: #{version}")
-            end
-            tbl1 << ["#{ip}:#{port}", protocol, city, country, hostname, os, service, app, version, info]
-          else
-            ips = match['ip']
-            site = match['site']
-            database = match['db']
-            if database.empty?
-              db_info = ""
-            else
-              db_info = database.map { |db|
-                if !db['name']&.empty? && !db['version']&.empty?
-                  "#{db['name']}:#{db['version']}"
-                else
-                  ""
-                end
-              }
-            end
-            webapp = match['webapp']
-            if webapp.empty?
-              wa_info = ""
-            else
-              wa_info = webapp.map { |wa|
-                if !wa['name']&.empty? && !wa['version']&.empty?
-                  "#{wa['name']}:#{wa['version']}"
-                else
-                  ""
-                end
-              }
-            end
-            if datastore['DATABASE']
-              for ip in ips
-                report_host(host: ip, name: site, comments: 'Added from Zoomeye')
-              end
-            end
-            for ip in ips
-              tbl2 << [ip, site, city, country, db_info, wa_info]
-            end
+        matches = result.is_a?(Hash) ? (result['matches'] || result['data'] || []) : []
+
+        matches.each do |match|
+          city     = match['city.name'] || match.dig('city', 'name') || 'Unknown'
+          country  = match['country.name'] || match.dig('country', 'name') || 'Unknown'
+          ip       = match['ip'].is_a?(Array) ? match['ip'].first : match['ip']
+          protocol = match['protocol'].to_s.downcase
+          port     = match['port']
+          hostname = match['hostname'] || match['domain'] || ''
+          os       = match['os'] || ''
+          app      = match['product'] || match['app'] || ''
+          service  = match['service'] || 'unknown'
+          version  = match['version'] || ''
+          info     = match['banner'] || ''
+
+          # Normalize protocol (defaults to 'tcp' if not valid 'tcp' or 'udp')
+          protocol = 'tcp' unless %w[tcp udp].include?(protocol)
+
+          if datastore['DATABASE']
+            report_host(
+              host: ip,
+              name: hostname,
+              os_name: os,
+              comments: 'Added from ZoomEye'
+            )
+
+            report_service(
+              host: ip,
+              port: port,
+              proto: protocol,
+              name: service,
+              info: "#{app} running version: #{version}".strip
+            )
           end
+          tbl1 << ["#{ip}:#{port}", protocol, city, country, hostname, os, service, app, version, info]
         end
       end
-      if resource.include?('host')
-        print_line(tbl1.to_s)
-        save_output(tbl1) if datastore['OUTFILE']
-      else
-        print_line(tbl2.to_s)
-        save_output(tbl2) if datastore['OUTFILE']
-      end
+      print_line(tbl1.to_s)
+      save_output(tbl1) if datastore['OUTFILE']
     end
     if datastore['FACETS']
       print_line(facets_tbl.to_s)
