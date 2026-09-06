@@ -269,7 +269,11 @@ class MetasploitModule < Msf::Auxiliary
               info: "#{app} running version: #{version}".strip
             )
           end
-          tbl1 << ["#{ip}:#{port}", protocol, city, country, hostname, os, service, app, version, info]
+          if resource == 'web'
+            tbl1 << [ip, protocol, city, country, hostname, os, service, app, version, info]
+          else
+            tbl1 << ["#{ip}:#{port}", protocol, city, country, hostname, os, service, app, version, info]
+          end
         end
       end
       print_line(tbl1.to_s)
